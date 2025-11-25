@@ -11,7 +11,13 @@ local TEMPLATE_ATTRIBUTE = "IsTemplate" -- mark true on any model you DON'T want
 local HEADSHOT_TEMPLATE_PATH = { "ReplicatingAssets", "HeadshotTemplate" }
 
 --// INTERNAL
-local plotsFolder = Workspace:WaitForChild(PLOTS_FOLDER_NAME)
+local plotsFolder = Workspace:FindFirstChild(PLOTS_FOLDER_NAME) or Workspace:WaitForChild(PLOTS_FOLDER_NAME, 5)
+if not plotsFolder then
+        warn(("[PlotManager] %s folder missing; creating a new one for safety."):format(PLOTS_FOLDER_NAME))
+        plotsFolder = Instance.new("Folder")
+        plotsFolder.Name = PLOTS_FOLDER_NAME
+        plotsFolder.Parent = Workspace
+end
 
 -- [plotModel] = { PlotID = number, Claimed = bool, Owner = Player? }
 local plotPool: {[Model]: {PlotID: number, Claimed: boolean, Owner: Player?}} = {}
@@ -19,31 +25,38 @@ local plotPool: {[Model]: {PlotID: number, Claimed: boolean, Owner: Player?}} = 
 local playerToPlot: {[Player]: Model} = {}
 
 local headshotTemplate: BillboardGui? = nil
+local headshotResolutionAttempted = false
 
 --// UTIL
 
 local function resolveHeadshotTemplate(): BillboardGui?
-	if headshotTemplate and headshotTemplate.Parent then
-		return headshotTemplate
-	end
+        if headshotTemplate and headshotTemplate.Parent then
+                return headshotTemplate
+        end
+
+        if headshotResolutionAttempted and not headshotTemplate then
+                return nil
+        end
+
+        headshotResolutionAttempted = true
 
 	local current: Instance = ReplicatedStorage
 	for _, name in ipairs(HEADSHOT_TEMPLATE_PATH) do
 		local nextInstance = current:FindFirstChild(name)
-		if not nextInstance then
-			warn(("[PlotManager] Could not find %s while resolving HeadshotTemplate"):format(name))
-			return nil
-		end
-		current = nextInstance
-	end
+                if not nextInstance then
+                        warn(("[PlotManager] Could not find %s while resolving HeadshotTemplate"):format(name))
+                        return nil
+                end
+                current = nextInstance
+        end
 
 	if current and current:IsA("BillboardGui") then
 		headshotTemplate = current
 	else
-		warn("[PlotManager] HeadshotTemplate is not a BillboardGui")
-	end
+                warn("[PlotManager] HeadshotTemplate is not a BillboardGui")
+        end
 
-	return headshotTemplate
+        return headshotTemplate
 end
 
 local function clearHeadshotGui(plotModel: Model)

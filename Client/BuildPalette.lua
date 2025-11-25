@@ -102,11 +102,11 @@ local function materialFrom(anyValue: any): Enum.Material
 end
 
 local function clearViewport(vp: ViewportFrame)
-	for _, c in ipairs(vp:GetChildren()) do
-		if c:IsA("Camera") or c:IsA("Model") or c:IsA("BasePart") or c:IsA("WorldModel") then
-			c:Destroy()
-		end
-	end
+        for _, c in ipairs(vp:GetChildren()) do
+                if c:GetAttribute("PalettePreview") then
+                        c:Destroy()
+                end
+        end
 end
 
 local function applyVisualToBasePart(part: BasePart, visual: VisualSpec?)
@@ -160,18 +160,19 @@ end
 
 local function renderCell(cell: Frame, builderSpec: BuilderSpec)
 	local vp = cell:FindFirstChildOfClass("ViewportFrame")
-	if not vp then
-		vp = Instance.new("ViewportFrame")
-		vp.Size = UDim2.fromScale(1, 1)
-		vp.Parent = cell
-	end
-	clearViewport(vp)
+        if not vp then
+                vp = Instance.new("ViewportFrame")
+                vp.Size = UDim2.fromScale(1, 1)
+                vp.Parent = cell
+        end
+        clearViewport(vp)
 
-	local cam = Instance.new("Camera")
-	cam.FieldOfView = 40
-	cam.Parent = vp
-	vp.CurrentCamera = cam
-	vp.BackgroundTransparency = 1
+        local cam = Instance.new("Camera")
+        cam.FieldOfView = 40
+        cam:SetAttribute("PalettePreview", true)
+        cam.Parent = vp
+        vp.CurrentCamera = cam
+        vp.BackgroundTransparency = 1
 
 	-- For Special blocks, preview the actual SourceInstance without overriding visuals.
 	local templateToUse: Instance
@@ -188,8 +189,10 @@ local function renderCell(cell: Frame, builderSpec: BuilderSpec)
 		end
 	end
 
-	local preview = buildPreviewInstance(templateToUse, previewVisual)
-	preview.Parent = vp
+        local preview = buildPreviewInstance(templateToUse, previewVisual)
+        preview.Parent = vp
+
+        preview:SetAttribute("PalettePreview", true)
 
 	local p: BasePart?
 	if preview:IsA("BasePart") then
@@ -198,10 +201,10 @@ local function renderCell(cell: Frame, builderSpec: BuilderSpec)
 		p = preview:FindFirstChildWhichIsA("BasePart", true)
 	end
 
-	if p then
-		p.CFrame = CFrame.new(0, 1, 0)
-		cam.CFrame = CFrame.new(Vector3.new(8, 8, 8), Vector3.new())
-	end
+        if p then
+            p.CFrame = CFrame.new(0, 1, 0)
+            cam.CFrame = CFrame.new(Vector3.new(8, 8, 8), Vector3.new())
+        end
 end
 
 local function constructCell(blockId: string, builderSpec: BuilderSpec): Frame
@@ -215,62 +218,71 @@ local function constructCell(blockId: string, builderSpec: BuilderSpec): Frame
 	--     label.Text = blockId
 	-- end
 
-	local function getPlacementPayload()
-		-- Decide how this block should be spawned when selected.
-		if builderSpec.Special and builderSpec.SourceInstance then
-			-- Special blocks: directly clone the source instance, no visual overrides.
-			return {
-				Category = builderSpec.Category,
-				Visual = nil,
-				TemplateName = nil,
+        local function getPlacementPayload()
+                -- Decide how this block should be spawned when selected.
+                if builderSpec.Special and builderSpec.SourceInstance then
+                        if not builderSpec.SourceInstance:IsDescendantOf(paletteRoot) then
+                                warn(("Palette source for %s is missing; cannot select"):format(blockId))
+                                return nil
+                        end
+                        -- Special blocks: directly clone the source instance, no visual overrides.
+                        return {
+                                Category = builderSpec.Category,
+                                Visual = nil,
+                                TemplateName = nil,
 				SourceInstance = builderSpec.SourceInstance,
 				Special = true,
 			}
-		else
-			-- Normal blocks: use a template from BlockTemplates plus a Visual spec.
-			local templateToUse = templatesRoot:FindFirstChild(selectedTemplateName) or defaultTemplate
-			return {
-				Category = builderSpec.Category,
-				Visual = builderSpec.Visual,
-				TemplateName = selectedTemplateName,
-				SourceInstance = templateToUse,
-				Special = false,
-			}
-		end
-	end
+                else
+                        -- Normal blocks: use a template from BlockTemplates plus a Visual spec.
+                        local templateToUse = templatesRoot:FindFirstChild(selectedTemplateName) or defaultTemplate
+                        local templateName = templateToUse and templateToUse.Name or defaultTemplate.Name
+                        return {
+                                Category = builderSpec.Category,
+                                Visual = builderSpec.Visual,
+                                TemplateName = templateName,
+                                SourceInstance = templateToUse,
+                                Special = false,
+                        }
+                end
+        end
 
 	local hit = cell:FindFirstChild("Hitbox")
 	hit = (hit and hit:IsA("ImageButton")) and hit or nil
 	if hit then
 		hit.MouseButton1Click:Connect(function()
 			-- 🔹 Palette is now "the boss" → tell hotbar to clear selection
-			if clearHotbarSelectionBE then
-				clearHotbarSelectionBE:Fire()
-			end
+                        if clearHotbarSelectionBE then
+                                clearHotbarSelectionBE:Fire()
+                        end
 
-			if currentPaletteBlockId == blockId then
-				-- toggle off
-				currentPaletteBlockId = nil
-				setBlockIdBE:Fire(nil, nil)
-			else
-				-- toggle on
-				currentPaletteBlockId = blockId
-				local payload = getPlacementPayload()
-				setBlockIdBE:Fire(blockId, payload)
-			end
-		end)
-	end
+                        if currentPaletteBlockId == blockId then
+                                -- toggle off
+                                currentPaletteBlockId = nil
+                                setBlockIdBE:Fire(nil, nil)
+                        else
+                                -- toggle on
+                                currentPaletteBlockId = blockId
+                                local payload = getPlacementPayload()
+                                if payload then
+                                        setBlockIdBE:Fire(blockId, payload)
+                                end
+                        end
+                end)
+        end
 
 	-- Hook AddToHotbarButton if present
 	local addBtn = cell:FindFirstChild("AddToHotbarButton")
-	if addBtn and addBtn:IsA("TextButton") then
-		addBtn.MouseButton1Click:Connect(function()
-			if addBlockToHotbarBE then
-				local payload = getPlacementPayload()
-				addBlockToHotbarBE:Fire(blockId, payload)
-			end
-		end)
-	end
+        if addBtn and addBtn:IsA("TextButton") then
+                addBtn.MouseButton1Click:Connect(function()
+                        if addBlockToHotbarBE then
+                                local payload = getPlacementPayload()
+                                if payload then
+                                        addBlockToHotbarBE:Fire(blockId, payload)
+                                end
+                        end
+                end)
+        end
 
 	renderCell(cell, builderSpec)
 	return cell
