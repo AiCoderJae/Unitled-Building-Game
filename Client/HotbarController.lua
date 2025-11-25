@@ -166,23 +166,24 @@ local function applyVisualToBasePart(part: BasePart, visual: VisualSpec?)
 		end)
 	end
 
-	-- Clear any existing textures
-	for _, child in ipairs(part:GetChildren()) do
-		if child:IsA("Texture") then
-			child:Destroy()
-		end
-	end
+        -- Clear any textures we previously added for previews
+        for _, child in ipairs(part:GetChildren()) do
+                if child:IsA("Texture") and child:GetAttribute("HotbarPreviewTexture") then
+                        child:Destroy()
+                end
+        end
 
 	if visual.TextureId and visual.TextureId ~= "" then
 		for _, face in ipairs(Enum.NormalId:GetEnumItems()) do
-			local tx = Instance.new("Texture")
-			tx.Texture = visual.TextureId
-			tx.Face = face
-			tx.StudsPerTileU = visual.StudsPerTileU or 4
-			tx.StudsPerTileV = visual.StudsPerTileV or 4
-			tx.Parent = part
-		end
-	end
+                        local tx = Instance.new("Texture")
+                        tx.Texture = visual.TextureId
+                        tx.Face = face
+                        tx.StudsPerTileU = visual.StudsPerTileU or 4
+                        tx.StudsPerTileV = visual.StudsPerTileV or 4
+                        tx:SetAttribute("HotbarPreviewTexture", true)
+                        tx.Parent = part
+                end
+        end
 end
 
 local function clearViewport(vp: ViewportFrame)
@@ -391,12 +392,13 @@ end
 
 
 local function clearSlot(index: number)
-	slots[index] = nil
-	if selectedIndex == index then
-		selectedIndex = nil
-		updateSelectionHighlight()
-	end
-	renderSlot(index)
+        slots[index] = nil
+        if selectedIndex == index then
+                selectedIndex = nil
+                updateSelectionHighlight()
+                setBlockIdBE:Fire(nil, nil)
+        end
+        renderSlot(index)
 end
 
 -- Build remover slot first so it appears on the far left
@@ -502,14 +504,18 @@ mouse.Button1Down:Connect(function()
 		return
 	end
 
-	local target = mouse.Target
-	if not target then
-		return
-	end
+        local target = mouse.Target
+        if not (target and target:IsA("BasePart")) then
+                return
+        end
 
-	-- Fire to server; RemovalService will check tags/ownership and destroy if valid
-	removeBlockRE:FireServer(target)
-	setHighlightedPart(nil)
+        if not CollectionService:HasTag(target, "PlacedBlock") then
+                return
+        end
+
+        -- Fire to server; RemovalService will check tags/ownership and destroy if valid
+        removeBlockRE:FireServer(target)
+        setHighlightedPart(nil)
 end)
 
 --highlight renderstepped loop
