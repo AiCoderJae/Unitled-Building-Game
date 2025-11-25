@@ -1,0 +1,9 @@
+Structure in Studio:
+StarterPlayerScripts/Client(Folder)
+
+Contents:
+- BuildBlockTypeBar(LocalScript)
+- BuildPalette(LocalScript)
+- HotbarController(LocalScript)
+- PlacementController(LocalScript)
+

@@ -1,0 +1,12 @@
+Location in Studio:
+ReplicatedStorage/Remotes
+
+Contents:
+- PlaceBlock (RemoteEvent)
+- RemoveBlock (RemoteEvent)
+- PlacePreview (RemoteFunction)
+
+Notes:
+- All client → server placement requests use PlaceBlock.
+- RemoveBlock handles deletion.
+- PlacePreview is only used for the ghost block.
