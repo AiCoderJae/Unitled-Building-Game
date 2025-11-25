@@ -25,15 +25,15 @@ local fallbackPlacedFolder = Workspace:FindFirstChild("PlacedBlocks") or (functi
 end)()
 
 local function resolveTemplateByName(name)
-	if type(name) == "string" and #name > 0 then
-		return BlockTemplates:FindFirstChild(name)
-	end
-	return nil
+        if type(name) == "string" and #name > 0 then
+                return BlockTemplates:FindFirstChild(name)
+        end
+        return nil
 end
 
 local function spawnFromTemplate(tpl)
-	if tpl:IsA("BasePart") then return tpl:Clone() end
-	if tpl:IsA("Model") and tpl.PrimaryPart then return tpl.PrimaryPart:Clone() end
+        if tpl:IsA("BasePart") then return tpl:Clone() end
+        if tpl:IsA("Model") and tpl.PrimaryPart then return tpl.PrimaryPart:Clone() end
 
 	local p = Instance.new("Part")
 	p.Size = Vector3.new(GridUtil.BLOCK_SIZE, GridUtil.BLOCK_SIZE, GridUtil.BLOCK_SIZE)
@@ -103,63 +103,70 @@ local function isInsidePlot(targetCf, boundary)
 end
 
 PlaceBlockEvent.OnServerEvent:Connect(function(plr, blockId, cf, sourceInstance, visualSpec, rotationY)
-	local plotModel = PlotManager.GetPlayerPlot(plr)
-	if not plotModel then
-		warn(("[Placement] %s has no assigned plot; blocking placement."):format(plr.Name))
-		return
-	end
+        local plotModel = PlotManager.GetPlayerPlot(plr)
+        if not plotModel then
+                warn(("[Placement] %s has no assigned plot; blocking placement."):format(plr.Name))
+                return
+        end
 
-	local boundary = plotModel:FindFirstChild("PlotBoundary")
-	if boundary then
-		print("==== Placement Debug ====")
-		print("Player:", plr.Name)
-		print("Plot model:", plotModel.Name)
-		print("Boundary pos:", boundary.Position, "size:", boundary.Size)
-		print("Block world pos:", cf.Position)
-
-		local localCf = boundary.CFrame:Inverse() * CFrame.new(cf.Position)
-		local localPos = localCf.Position
-		local halfSize = boundary.Size * 0.5
-
-		print("LocalPos:", localPos, "HalfSize:", halfSize)
-	end
-	local blocksFolder = plotModel:FindFirstChild("PlayerPlacedBlocks")
+        local boundary = plotModel:FindFirstChild("PlotBoundary")
+        local blocksFolder = plotModel:FindFirstChild("PlayerPlacedBlocks")
 
 	if not blocksFolder then
 		warn(("[Placement] Plot for %s missing PlayerPlacedBlocks; using fallback."):format(plr.Name))
 		blocksFolder = fallbackPlacedFolder
 	end
-	-- Hard Y cap: blocks cannot be placed above Y = 122
-	if cf.Position.Y > 122 then
-		warn(("[Placement] %s attempted to place above Y cap; blocked."):format(plr.Name))
-		return
-	end
-	if boundary and not isInsidePlot(cf, boundary) then
-		warn(("[Placement] %s attempted to place outside plot bounds; blocked."):format(plr.Name))
-		return
-	end
+        -- Hard Y caps: keep placements within play space
+        if cf.Position.Y > 122 then
+                warn(("[Placement] %s attempted to place above Y cap; blocked."):format(plr.Name))
+                return
+        end
+        local minY = GridUtil.ORIGIN.Y + (GridUtil.BLOCK_SIZE * 0.5)
+        if cf.Position.Y < minY then
+                warn(("[Placement] %s attempted to place below floor; blocked."):format(plr.Name))
+                return
+        end
 
-	local tpl = nil
-	if sourceInstance and (not BlockPalette or sourceInstance:IsDescendantOf(BlockPalette) or sourceInstance:IsDescendantOf(BlockTemplates)) then
-		tpl = sourceInstance
-	end
-	if not tpl and visualSpec and visualSpec.TemplateName then
-		tpl = resolveTemplateByName(visualSpec.TemplateName)
-	end
-	if not tpl then
-		tpl = resolveTemplateByName("Block_4x4x4")
-	end
+        if boundary and not isInsidePlot(cf, boundary) then
+                warn(("[Placement] %s attempted to place outside plot bounds; blocked."):format(plr.Name))
+                return
+        end
 
-	local part = spawnFromTemplate(tpl)
-	part.Anchored = true
-	part.CanCollide = true
-	part.Name = "Block"
+        local tpl = nil
+        if sourceInstance then
+                local paletteAllowed = BlockPalette and sourceInstance:IsDescendantOf(BlockPalette)
+                local templateAllowed = sourceInstance:IsDescendantOf(BlockTemplates)
 
-	local yaw = tonumber(rotationY) or 0
-	part.CFrame = cf * CFrame.Angles(0, math.rad(yaw), 0)
+                if paletteAllowed or templateAllowed then
+                        tpl = sourceInstance
+                end
+        end
+        if not tpl and visualSpec and visualSpec.TemplateName then
+                tpl = resolveTemplateByName(visualSpec.TemplateName)
+        end
+        if not tpl then
+                tpl = resolveTemplateByName("Block_4x4x4")
+        end
 
-	applyVisuals(part, visualSpec)
+        if not tpl then
+                warn(("[Placement] %s attempted to place unknown template; blocked."):format(plr.Name))
+                return
+        end
 
-	part.Parent = blocksFolder
-	CollectionService:AddTag(part, "PlacedBlock")
+        local part = spawnFromTemplate(tpl)
+        if not part then
+                warn(("[Placement] %s failed to spawn block; blocked."):format(plr.Name))
+                return
+        end
+        part.Anchored = true
+        part.CanCollide = true
+        part.Name = "Block"
+
+        local yaw = tonumber(rotationY) or 0
+        part.CFrame = cf * CFrame.Angles(0, math.rad(yaw), 0)
+
+        applyVisuals(part, visualSpec)
+
+        part.Parent = blocksFolder
+        CollectionService:AddTag(part, "PlacedBlock")
 end)

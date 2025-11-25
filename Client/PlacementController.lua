@@ -46,8 +46,10 @@ local function resolveTemplateByName(name: string?): Instance?
 end
 
 local function getTemplateFor(): Instance?
-	if currentSourceInstance and currentSourceInstance.Parent then return currentSourceInstance end
-	return resolveTemplateByName("Block_4x4x4")
+        if currentSourceInstance and currentSourceInstance:IsDescendantOf(BlockAssets) then
+                return currentSourceInstance
+        end
+        return resolveTemplateByName("Block_4x4x4")
 end
 
 local function measureTemplateHeight(inst: Instance?): number
@@ -58,6 +60,11 @@ local function measureTemplateHeight(inst: Instance?): number
 		return size.Y
 	end
 	return GridUtil.BLOCK_SIZE
+end
+
+local function isTextInputFocused(): boolean
+        local focused = UserInputService:GetFocusedTextBox()
+        return focused ~= nil
 end
 
 local function clearTextures(part: Instance)
@@ -183,21 +190,33 @@ UserInputService.InputBegan:Connect(function(input, processed)
 end)
 
 RunService.RenderStepped:Connect(function(dt)
-	-- If no block is equipped, we don't show or update the ghost at all.
-	if not currentBlockId then
-		destroyGhost()
-		lastPlacedCenter = nil
-		return
+        -- Ignore all placement visuals while typing/chatting so we don't capture mouse rays
+        if isTextInputFocused() then
+                destroyGhost()
+                lastPlacedCenter = nil
+                return
+        end
+
+        -- If no block is equipped, we don't show or update the ghost at all.
+        if not currentBlockId then
+                destroyGhost()
+                lastPlacedCenter = nil
+                return
 	end
 
 	rebuildRayFilter()
 
-	local unitRay = Mouse.UnitRay
-	local result = Workspace:Raycast(unitRay.Origin, unitRay.Direction * HIDE_DIST, rayParams)
+        local unitRay = Mouse.UnitRay
+        if not unitRay then
+                destroyGhost()
+                lastPlacedCenter = nil
+                return
+        end
+        local result = Workspace:Raycast(unitRay.Origin, unitRay.Direction * HIDE_DIST, rayParams)
 
-	if not result then
-		destroyGhost()
-		lastPlacedCenter = nil
+        if not result then
+                destroyGhost()
+                lastPlacedCenter = nil
 		return
 	end
 
@@ -220,7 +239,13 @@ RunService.RenderStepped:Connect(function(dt)
 		center = Vector3.new(center.X, sideFaceY(result, lastTemplateHeight), center.Z)
 	end
 
-	lastPlacedCenter = center
+        -- Prevent sinking below the build origin plane
+        local floorY = GridUtil.ORIGIN.Y + (lastTemplateHeight * 0.5)
+        if center.Y < floorY then
+                center = Vector3.new(center.X, floorY, center.Z)
+        end
+
+        lastPlacedCenter = center
 	local targetCF = CFrame.new(center) * CFrame.Angles(0, math.rad(currentRotationY), 0)
 
 	local ghost = createGhost()
@@ -238,9 +263,10 @@ RunService.RenderStepped:Connect(function(dt)
 end)
 
 Mouse.Button1Down:Connect(function()
-	if not currentBlockId then return end
-	if not lastPlacedCenter then return end
-	PlaceBlockEvent:FireServer(currentBlockId, CFrame.new(lastPlacedCenter), currentSourceInstance, currentVisual, currentRotationY)
+        if isTextInputFocused() then return end
+        if not currentBlockId then return end
+        if not lastPlacedCenter then return end
+        PlaceBlockEvent:FireServer(currentBlockId, CFrame.new(lastPlacedCenter), currentSourceInstance, currentVisual, currentRotationY)
 end)
 
 SetBlockIdBE.Event:Connect(function(blockId: string?, spec)
