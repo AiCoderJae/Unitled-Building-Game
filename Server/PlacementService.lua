@@ -133,8 +133,13 @@ PlaceBlockEvent.OnServerEvent:Connect(function(plr, blockId, cf, sourceInstance,
         end
 
         local tpl = nil
-        if sourceInstance and (not BlockPalette or sourceInstance:IsDescendantOf(BlockPalette) or sourceInstance:IsDescendantOf(BlockTemplates)) then
-                tpl = sourceInstance
+        if sourceInstance then
+                local paletteAllowed = BlockPalette and sourceInstance:IsDescendantOf(BlockPalette)
+                local templateAllowed = sourceInstance:IsDescendantOf(BlockTemplates)
+
+                if paletteAllowed or templateAllowed then
+                        tpl = sourceInstance
+                end
         end
         if not tpl and visualSpec and visualSpec.TemplateName then
                 tpl = resolveTemplateByName(visualSpec.TemplateName)
@@ -161,17 +166,6 @@ PlaceBlockEvent.OnServerEvent:Connect(function(plr, blockId, cf, sourceInstance,
         part.CFrame = cf * CFrame.Angles(0, math.rad(yaw), 0)
 
         applyVisuals(part, visualSpec)
-
-        -- Overlap guard: avoid intersecting other blocks or characters
-        local overlap = OverlapParams.new()
-        overlap.FilterType = Enum.RaycastFilterType.Exclude
-        overlap.FilterDescendantsInstances = { plr.Character, blocksFolder }
-        local touching = Workspace:GetPartBoundsInBox(part.CFrame, part.Size, overlap)
-        if touching and #touching > 0 then
-                warn(("[Placement] %s attempted to place intersecting another object; blocked."):format(plr.Name))
-                part:Destroy()
-                return
-        end
 
         part.Parent = blocksFolder
         CollectionService:AddTag(part, "PlacedBlock")
