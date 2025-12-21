@@ -12,6 +12,7 @@ local PlotManager = require(ServerScriptService:WaitForChild("Server"):WaitForCh
 
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
 local PlaceBlockEvent = Remotes:WaitForChild("PlaceBlock")
+local Notify = Remotes:WaitForChild("Notify")
 
 local BlockAssets = ReplicatedStorage:WaitForChild("BlockAssets")
 local BlockTemplates = BlockAssets:WaitForChild("BlockTemplates")
@@ -110,38 +111,39 @@ PlaceBlockEvent.OnServerEvent:Connect(function(plr, blockId, cf, sourceInstance,
 	end
 
 	local boundary = plotModel:FindFirstChild("PlotBoundary")
-	if boundary then
-		print("==== Placement Debug ====")
-		print("Player:", plr.Name)
-		print("Plot model:", plotModel.Name)
-		print("Boundary pos:", boundary.Position, "size:", boundary.Size)
-		print("Block world pos:", cf.Position)
-
-		local localCf = boundary.CFrame:Inverse() * CFrame.new(cf.Position)
-		local localPos = localCf.Position
-		local halfSize = boundary.Size * 0.5
-
-		print("LocalPos:", localPos, "HalfSize:", halfSize)
-	end
 	local blocksFolder = plotModel:FindFirstChild("PlayerPlacedBlocks")
 
 	if not blocksFolder then
 		warn(("[Placement] Plot for %s missing PlayerPlacedBlocks; using fallback."):format(plr.Name))
 		blocksFolder = fallbackPlacedFolder
 	end
-	-- Hard Y cap: blocks cannot be placed above Y = 122
+	-- Hard Y caps: keep placements within play space
 	if cf.Position.Y > 122 then
 		warn(("[Placement] %s attempted to place above Y cap; blocked."):format(plr.Name))
 		return
 	end
+	local minY = GridUtil.ORIGIN.Y + (GridUtil.BLOCK_SIZE * 0.5)
+	if cf.Position.Y < minY then
+		warn(("[Placement] %s attempted to place below floor; blocked."):format(plr.Name))
+		return
+	end
+
 	if boundary and not isInsidePlot(cf, boundary) then
-		warn(("[Placement] %s attempted to place outside plot bounds; blocked."):format(plr.Name))
+		Notify:FireClient(plr, {
+			text = "Place blocks inside your plot.",
+			duration = 2.0,
+		})
 		return
 	end
 
 	local tpl = nil
-	if sourceInstance and (not BlockPalette or sourceInstance:IsDescendantOf(BlockPalette) or sourceInstance:IsDescendantOf(BlockTemplates)) then
-		tpl = sourceInstance
+	if sourceInstance then
+		local paletteAllowed = BlockPalette and sourceInstance:IsDescendantOf(BlockPalette)
+		local templateAllowed = sourceInstance:IsDescendantOf(BlockTemplates)
+
+		if paletteAllowed or templateAllowed then
+			tpl = sourceInstance
+		end
 	end
 	if not tpl and visualSpec and visualSpec.TemplateName then
 		tpl = resolveTemplateByName(visualSpec.TemplateName)
@@ -150,7 +152,16 @@ PlaceBlockEvent.OnServerEvent:Connect(function(plr, blockId, cf, sourceInstance,
 		tpl = resolveTemplateByName("Block_4x4x4")
 	end
 
+	if not tpl then
+		warn(("[Placement] %s attempted to place unknown template; blocked."):format(plr.Name))
+		return
+	end
+
 	local part = spawnFromTemplate(tpl)
+	if not part then
+		warn(("[Placement] %s failed to spawn block; blocked."):format(plr.Name))
+		return
+	end
 	part.Anchored = true
 	part.CanCollide = true
 	part.Name = "Block"
