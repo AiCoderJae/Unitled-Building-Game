@@ -1,0 +1,83 @@
+-- GridUtil.lua (v1.2)
+-- Fix: WorldToCell now uses FLOOR instead of ROUND.
+-- Why: When passing an already-centered position (e.g., 2 with 4-stud blocks),
+-- ROUND would return the *next* cell (1), causing a 1-cell offset. FLOOR keeps it in the correct cell (0).
+
+local GridUtil = {}
+
+-- === Configuration ===
+GridUtil.BLOCK_SIZE = 4
+GridUtil.ORIGIN = Vector3.new(0, 0, 0)
+GridUtil.TOLERANCE = 1e-4
+
+-- === Internal helpers ===
+local function ifloor(n: number): number
+	-- integer floor that behaves well for negatives too
+	return math.floor(n)
+end
+
+-- Convert world position -> integer grid cell (x,y,z) using FLOOR
+function GridUtil.WorldToCell(worldPos: Vector3): Vector3
+	local s = GridUtil.BLOCK_SIZE
+	local o = GridUtil.ORIGIN
+	local gx = ifloor((worldPos.X - o.X) / s)
+	local gy = ifloor((worldPos.Y - o.Y) / s)
+	local gz = ifloor((worldPos.Z - o.Z) / s)
+	return Vector3.new(gx, gy, gz)
+end
+
+-- Convert integer grid cell -> world position at the CENTER of that cell
+function GridUtil.CellToWorld(cell: Vector3): Vector3
+	local s = GridUtil.BLOCK_SIZE
+	local o = GridUtil.ORIGIN
+	return Vector3.new(
+		o.X + (cell.X + 0.5) * s,
+		o.Y + (cell.Y + 0.5) * s,
+		o.Z + (cell.Z + 0.5) * s
+	)
+end
+
+-- Snap an arbitrary world position to the nearest cell center
+-- Implementation: floor to the cell, then map to its center.
+function GridUtil.SnapVector3(worldPos: Vector3): Vector3
+	local cell = GridUtil.WorldToCell(worldPos)
+	return GridUtil.CellToWorld(cell)
+end
+
+-- Snap a CFrame's position to the nearest cell center (keeps orientation)
+function GridUtil.SnapCFrame(cf: CFrame): CFrame
+	local snapped = GridUtil.SnapVector3(cf.Position)
+	return CFrame.new(snapped, snapped + cf.LookVector)
+end
+
+-- Utility: get the major axis of a normal
+function GridUtil.GetMajorAxis(normal: Vector3): Vector3
+	local ax, ay, az = math.abs(normal.X), math.abs(normal.Y), math.abs(normal.Z)
+	if ax >= ay and ax >= az then
+		return Vector3.new(normal.X >= 0 and 1 or -1, 0, 0)
+	elseif ay >= ax and ay >= az then
+		return Vector3.new(0, normal.Y >= 0 and 1 or -1, 0)
+	else
+		return Vector3.new(0, 0, normal.Z >= 0 and 1 or -1)
+	end
+end
+
+-- Adjacent placement center: shift half a block along face normal then snap
+function GridUtil.GetPlacementCenter(rayResult: RaycastResult): Vector3
+	local p = rayResult.Position
+	local n = GridUtil.GetMajorAxis(rayResult.Normal)
+	local half = GridUtil.BLOCK_SIZE * 0.5
+	local probe = p + n * (half - GridUtil.TOLERANCE)
+	return GridUtil.SnapVector3(probe)
+end
+
+-- Removal center: shift half a block opposite face normal then snap
+function GridUtil.GetRemovalCenter(rayResult: RaycastResult): Vector3
+	local p = rayResult.Position
+	local n = GridUtil.GetMajorAxis(rayResult.Normal)
+	local half = GridUtil.BLOCK_SIZE * 0.5
+	local probe = p - n * (half - GridUtil.TOLERANCE)
+	return GridUtil.SnapVector3(probe)
+end
+
+return GridUtil
