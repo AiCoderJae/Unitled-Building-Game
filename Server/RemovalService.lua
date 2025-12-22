@@ -22,6 +22,9 @@ local removeBlockRE = Remotes:WaitForChild("RemoveBlock")
 
 local PlotManager = require(ServerScriptService:WaitForChild("Server"):WaitForChild("PlotManager"))
 
+local lastRemovalRequest: {[Player]: number} = {}
+local REMOVAL_COOLDOWN = 0.1
+
 local function getPlayerBlocksFolder(plr: Player): Folder?
 	local plotModel = PlotManager.GetPlayerPlot(plr)
 	if not plotModel then
@@ -51,6 +54,13 @@ local function isBlockOwnedByPlayer(part: BasePart, plr: Player): boolean
 end
 
 removeBlockRE.OnServerEvent:Connect(function(plr, target: Instance)
+	local now = os.clock()
+	local last = lastRemovalRequest[plr]
+	if last and (now - last) < REMOVAL_COOLDOWN then
+		return
+	end
+	lastRemovalRequest[plr] = now
+
 	if typeof(target) ~= "Instance" then
 		return
 	end
