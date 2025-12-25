@@ -1,0 +1,68 @@
+-- ServerScriptService/Server/BuildStore.lua
+-- DataStore wrapper (per-player key, with legacy per-plot read support)
+
+local DataStoreService = game:GetService("DataStoreService")
+
+local BuildStore = {}
+BuildStore.__index = BuildStore
+
+function BuildStore.new(storeName: string)
+	local self = setmetatable({}, BuildStore)
+	self._ds = DataStoreService:GetDataStore(storeName)
+	return self
+end
+
+function BuildStore:Key(userId: number): string
+	return string.format("u%d", userId)
+end
+
+function BuildStore:LegacyKey(userId: number, plotId: number): string
+	return string.format("u%d:p%d", userId, plotId)
+end
+
+function BuildStore:Load(userId: number)
+	local key = self:Key(userId)
+	local ok, data = pcall(function()
+		return self._ds:GetAsync(key)
+	end)
+	if not ok then
+		warn("[BuildStore] Load failed:", data)
+		return nil
+	end
+	return data
+end
+
+function BuildStore:Save(userId: number, plotIdOrRecords, maybeRecords)
+	-- Backward compatible: Save(userId, records) or Save(userId, plotId, records)
+	local records = maybeRecords
+	if records == nil and type(plotIdOrRecords) == "table" then
+		records = plotIdOrRecords
+	end
+	if records == nil then
+		return false
+	end
+
+	local key = self:Key(userId)
+	local ok, err = pcall(function()
+		self._ds:SetAsync(key, records)
+	end)
+	if not ok then
+		warn("[BuildStore] Save failed:", err)
+		return false
+	end
+	return true
+end
+
+function BuildStore:LoadLegacy(userId: number, plotId: number)
+	local key = self:LegacyKey(userId, plotId)
+	local ok, data = pcall(function()
+		return self._ds:GetAsync(key)
+	end)
+	if not ok then
+		warn("[BuildStore] Legacy Load failed:", data)
+		return nil
+	end
+	return data
+end
+
+return BuildStore
