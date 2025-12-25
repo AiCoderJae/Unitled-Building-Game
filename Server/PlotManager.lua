@@ -1,7 +1,15 @@
--- ServerSCriptService/Server/PlotManager.lua
+-- ServerScriptService/Server/PlotManager.lua
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local BuildStateService = require(ServerScriptService.Server.BuildStateService)
+local BuildStore = require(ServerScriptService.Server.BuildStore)
+
+-- DataStore name/version. Change this if you ever make a breaking record-format change.
+local BUILDSTORE_NAME = "PlayerBuilds_v1"
+local buildStore = BuildStore.new(BUILDSTORE_NAME)
 
 local PlotManager = {}
 
@@ -10,17 +18,61 @@ local PLOTS_FOLDER_NAME = "PlayerPlots"
 local TEMPLATE_ATTRIBUTE = "IsTemplate" -- mark true on any model you DON'T want used as a live plot
 local HEADSHOT_TEMPLATE_PATH = { "ReplicatingAssets", "HeadshotTemplate" }
 
---// INTERNAL
-local plotsFolder = Workspace:WaitForChild(PLOTS_FOLDER_NAME)
-
--- [plotModel] = { PlotID = number, Claimed = bool, Owner = Player? }
+--// STATE
 local plotPool: {[Model]: {PlotID: number, Claimed: boolean, Owner: Player?}} = {}
--- [player] = plotModel
 local playerToPlot: {[Player]: Model} = {}
 
-local headshotTemplate: BillboardGui? = nil
+--// TEMPLATE RESOLVING (shape templates)
+local templateCache: {[string]: Instance} = {}
 
---// UTIL
+local function findTemplateRoots(): {Instance}
+	local roots = {}
+
+	local function add(path: {string})
+		local node: Instance? = ReplicatedStorage
+		for _, name in ipairs(path) do
+			node = node and node:FindFirstChild(name)
+		end
+		if node then table.insert(roots, node) end
+	end
+
+	add({ "BlockAssets", "BlockTemplates" })
+	add({ "BlockTemplates" })
+
+	return roots
+end
+
+local function resolveTemplate(templateName: any): Instance?
+	local key = tostring(templateName)
+	if templateCache[key] then
+		return templateCache[key]
+	end
+
+	for _, root in ipairs(findTemplateRoots()) do
+		local byName = root:FindFirstChild(key)
+		if byName then
+			templateCache[key] = byName
+			return byName
+		end
+	end
+
+	-- Last resort: scan for Attribute BlockId match
+	for _, root in ipairs(findTemplateRoots()) do
+		for _, inst in ipairs(root:GetDescendants()) do
+			local bid = inst:GetAttribute("BlockId")
+			if tostring(bid) == key then
+				templateCache[key] = inst
+				return inst
+			end
+		end
+	end
+
+	warn(("[PlotManager] Missing template for templateName='%s' (cannot load this record)"):format(key))
+	return nil
+end
+
+--// HEADSHOT GUI
+local headshotTemplate: BillboardGui? = nil
 
 local function resolveHeadshotTemplate(): BillboardGui?
 	if headshotTemplate and headshotTemplate.Parent then
@@ -65,124 +117,70 @@ local function clearHeadshotGui(plotModel: Model)
 end
 
 local function applyHeadshotGui(plotModel: Model, player: Player)
-	local template = resolveHeadshotTemplate()
-	if not template then
-		return
-	end
-
 	local boundary = plotModel:FindFirstChild("PlotBoundary")
-	if not (boundary and boundary:IsA("BasePart")) then
-		warn(("[PlotManager] Plot %s is missing a valid PlotBoundary for headshot GUI"):format(plotModel.Name))
-		return
-	end
+	if not (boundary and boundary:IsA("BasePart")) then return end
 
 	local attachment = boundary:FindFirstChild("HeadshotAttachment")
-	if not (attachment and attachment:IsA("Attachment")) then
-		warn(("[PlotManager] Plot %s is missing HeadshotAttachment on PlotBoundary"):format(plotModel.Name))
-		return
-	end
+	if not (attachment and attachment:IsA("Attachment")) then return end
 
-	-- Remove any existing headshot GUI
-	clearHeadshotGui(plotModel)
+	local template = resolveHeadshotTemplate()
+	if not template then return end
 
-	local newGui = template:Clone()
-	newGui:SetAttribute("IsHeadshotGui", true)
-	newGui.Parent = attachment
+	clearHeadshotGui(plotModel) -- bring back old behavior
 
-	-- Drill into the expected structure:
-	-- BillboardGui -> Frame -> ImageFrame, NameFrame
-	local rootFrame = newGui:FindFirstChild("Frame")
-	if not (rootFrame and rootFrame:IsA("Frame")) then
-		return
-	end
+	local gui = template:Clone()
+	gui:SetAttribute("IsHeadshotGui", true)
+	gui.Parent = attachment
 
-	local imageFrame = rootFrame:FindFirstChild("ImageFrame")
-	local nameFrame = rootFrame:FindFirstChild("NameFrame")
+	-- Find any labels anywhere (supports both old + new template layouts)
+	local imageLabel = gui:FindFirstChildWhichIsA("ImageLabel", true)
+	local nameLabel  = gui:FindFirstChildWhichIsA("TextLabel", true)
 
-	local imageLabel: ImageLabel? = nil
-	if imageFrame and imageFrame:IsA("Frame") then
-		imageLabel = imageFrame:FindFirstChildWhichIsA("ImageLabel")
-	end
-
-	local nameLabel: TextLabel? = nil
-	if nameFrame and nameFrame:IsA("Frame") then
-		nameLabel = nameFrame:FindFirstChildWhichIsA("TextLabel")
-	end
-
-	-- Set player name
 	if nameLabel then
 		nameLabel.Text = player.DisplayName or player.Name
 	end
 
-	-- Set player headshot
 	if imageLabel then
-		local success, content = pcall(function()
+		local ok, content = pcall(function()
 			return Players:GetUserThumbnailAsync(
 				player.UserId,
 				Enum.ThumbnailType.HeadShot,
-				Enum.ThumbnailSize.Size100x100
+				Enum.ThumbnailSize.Size150x150
 			)
 		end)
-
-		if success and content then
+		if ok and content then
 			imageLabel.Image = content
-		else
-			warn(("[PlotManager] Failed to get thumbnail for %s"):format(player.Name))
 		end
 	end
 end
 
--- Register all manually placed plots in Workspace.PlayerPlots
+--// PLOTS
 local function registerPlots()
-	local nextId = 1
-
-	for _, child in ipairs(plotsFolder:GetChildren()) do
-		if child:IsA("Model") then
-			-- Skip any models explicitly marked as templates
-			if not child:GetAttribute(TEMPLATE_ATTRIBUTE) then
-				local boundary = child:FindFirstChild("PlotBoundary")
-				local blocksFolder = child:FindFirstChild("PlayerPlacedBlocks")
-
-				if boundary and boundary:IsA("BasePart") and blocksFolder and blocksFolder:IsA("Folder") then
-					local existingId = child:GetAttribute("PlotID")
-					local plotId = existingId or nextId
-
-					-- If there was no PlotID, assign one
-					if not existingId then
-						child:SetAttribute("PlotID", plotId)
-					end
-
-					child:SetAttribute("Claimed", false)
-					child:SetAttribute("OwnerUserId", nil)
-
-					plotPool[child] = {
-						PlotID = plotId,
-						Claimed = false,
-						Owner = nil,
-					}
-
-					nextId += 1
-				else
-					warn(("[PlotManager] Model %s in %s is missing PlotBoundary or PlayerPlacedBlocks; skipping.")
-						:format(child.Name, PLOTS_FOLDER_NAME))
-				end
-			end
-		end
+	local plotsFolder = Workspace:FindFirstChild(PLOTS_FOLDER_NAME)
+	if not plotsFolder then
+		warn(("[PlotManager] Missing Workspace.%s folder"):format(PLOTS_FOLDER_NAME))
+		return
 	end
 
-	if nextId == 1 then
-		warn("[PlotManager] No valid plot models found in Workspace.PlayerPlots. Did you set them up?")
+	for _, plotModel in ipairs(plotsFolder:GetChildren()) do
+		if plotModel:IsA("Model") and not plotModel:GetAttribute(TEMPLATE_ATTRIBUTE) then
+			local plotId = plotModel:GetAttribute("PlotID")
+			if typeof(plotId) ~= "number" then
+				-- fallback: parse digits from name
+				local n = tonumber(string.match(plotModel.Name, "%d+"))
+				plotId = n or 0
+			end
+			plotPool[plotModel] = { PlotID = plotId, Claimed = false, Owner = nil }
+		end
 	end
 end
 
 --// API
-
-function PlotManager.GetPlayerPlot(player: Player): Model?
+function PlotManager.GetPlot(player: Player): Model?
 	return playerToPlot[player]
 end
 
 function PlotManager.AssignPlot(player: Player): Model?
-	-- If already assigned, just return
 	if playerToPlot[player] then
 		return playerToPlot[player]
 	end
@@ -198,8 +196,42 @@ function PlotManager.AssignPlot(player: Player): Model?
 
 			playerToPlot[player] = plotModel
 
-			-- Add visual ownership marker
 			applyHeadshotGui(plotModel, player)
+
+			-- Ensure blocks folder exists
+			local blocksFolder = plotModel:FindFirstChild("PlayerPlacedBlocks")
+			if not blocksFolder then
+				blocksFolder = Instance.new("Folder")
+				blocksFolder.Name = "PlayerPlacedBlocks"
+				blocksFolder.Parent = plotModel
+			end
+
+			-- Bind plot for build tracking
+			BuildStateService:BindPlot(player, plotModel)
+
+			-- Load per-player build (works on any plot). If missing, migrate legacy per-plot keys.
+			local records = buildStore:Load(player.UserId)
+			if not records then
+				local found = nil
+				for _, d in pairs(plotPool) do
+					if d and typeof(d.PlotID) == "number" then
+						local legacy = buildStore:LoadLegacy(player.UserId, d.PlotID)
+						if legacy and type(legacy) == "table" and #legacy > 0 then
+							found = legacy
+							break
+						end
+					end
+				end
+				if found then
+					records = found
+					buildStore:Save(player.UserId, records)
+				end
+			end
+
+			if records then
+				blocksFolder:ClearAllChildren()
+				BuildStateService:SpawnRecords(player, records, blocksFolder, resolveTemplate)
+			end
 
 			return plotModel
 		end
@@ -215,6 +247,21 @@ function PlotManager.ReleasePlot(player: Player)
 		return
 	end
 
+	-- Save per-player build before clearing/unbinding
+	local snap = BuildStateService:Snapshot(player)
+	if snap then
+		buildStore:Save(player.UserId, snap)
+	end
+
+	-- Clear blocks
+	local blocksFolder = plotModel:FindFirstChild("PlayerPlacedBlocks")
+	if blocksFolder then
+		blocksFolder:ClearAllChildren()
+	end
+
+	clearHeadshotGui(plotModel)
+	BuildStateService:UnbindPlot(player)
+
 	local data = plotPool[plotModel]
 	if data then
 		data.Claimed = false
@@ -224,21 +271,10 @@ function PlotManager.ReleasePlot(player: Player)
 	plotModel:SetAttribute("Claimed", false)
 	plotModel:SetAttribute("OwnerUserId", nil)
 
-	-- Clear all placed blocks on release (you'll hook DataStore loading/saving later)
-	local blocksFolder = plotModel:FindFirstChild("PlayerPlacedBlocks")
-	if blocksFolder then
-		blocksFolder:ClearAllChildren()
-	end
-
-	-- Remove visual ownership marker
-	clearHeadshotGui(plotModel)
-
 	playerToPlot[player] = nil
-	player:SetAttribute("PlotID", nil)
 end
 
---// LIFECYCLE HOOKS
-
+--// LIFECYCLE
 Players.PlayerAdded:Connect(function(player)
 	PlotManager.AssignPlot(player)
 end)
