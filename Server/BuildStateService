@@ -1,0 +1,372 @@
+-- ServerScriptService/Server/BuildStateService.lua
+-- Session build mirror + serialization-friendly records (origin-relative).
+-- Designed for: multiple blocks per cell, visuals (Material/Variant/Textures), and arbitrary orientation (incl. flips).
+
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local CollectionService = game:GetService("CollectionService")
+
+local BuildStateService = {}
+
+--[[
+Record format (DataStore-safe):
+{
+  uid = "guid",
+  id = BlockId,
+  c = {cx, cy, cz},          -- integer cell coords relative to plot Origin
+  cf = {px,py,pz, r00,r01,r02, r10,r11,r12, r20,r21,r22}, -- relative to Origin
+  v = {                      -- visuals (all optional)
+    Color = {r,g,b},         -- 0..1
+    Material = "Plastic",
+    MaterialVariant = "MyVariant",
+    Transparency = 0,
+    Reflectance = 0,
+    TextureId = "rbxassetid://...",
+    StudsPerTileU = 4,
+    StudsPerTileV = 4,
+  },
+}
+]]
+
+local SESSION = {} -- [player] = { plotModel = Model, origin = BasePart, blocks = { [uid] = record }, cellIndex = { [cellKey] = {uid1, uid2, ...} } }
+
+local function cellKeyFromCell(c)
+	return string.format("%d,%d,%d", c[1], c[2], c[3])
+end
+
+local function color3ToTable(c3)
+	return { c3.R, c3.G, c3.B }
+end
+
+local function tableToColor3(t)
+	return Color3.new(t[1], t[2], t[3])
+end
+
+local function cfToTable(cf: CFrame)
+	-- GetComponents already returns: px,py,pz,r00,r01,r02,r10,r11,r12,r20,r21,r22
+	return { cf:GetComponents() }
+end
+
+local function _isClose(a, b)
+	return typeof(a) == "number" and typeof(b) == "number" and math.abs(a - b) < 1e-6
+end
+
+local function _fixLegacyCfTable(t)
+	-- Legacy bug shape: {px,py,pz, px,py,pz, r00,r01,r02, r10,r11,r12}
+	-- Detect by repeated position.
+	if type(t) ~= "table" or #t < 12 then return t end
+	if _isClose(t[4], t[1]) and _isClose(t[5], t[2]) and _isClose(t[6], t[3]) then
+		local px, py, pz = t[1], t[2], t[3]
+		local r00, r01, r02 = t[7], t[8], t[9]
+		local r10, r11, r12 = t[10], t[11], t[12]
+		-- Reconstruct third row via cross product (rows are orthonormal for a valid CFrame)
+		local r20 = (r01 * r12) - (r02 * r11)
+		local r21 = (r02 * r10) - (r00 * r12)
+		local r22 = (r00 * r11) - (r01 * r10)
+		return { px, py, pz, r00, r01, r02, r10, r11, r12, r20, r21, r22 }
+	end
+	return t
+end
+
+local function tableToCf(t)
+	-- expects 12 numbers
+	t = _fixLegacyCfTable(t)
+	return CFrame.new(
+		t[1], t[2], t[3],
+		t[4], t[5], t[6],
+		t[7], t[8], t[9],
+		t[10], t[11], t[12]
+	)
+end
+
+local function getVisualSpecFromPart(part: BasePart)
+	local v = {}
+
+	-- TemplateName (shape) for deterministic reloads
+	local tn = part:GetAttribute("TemplateName")
+	if type(tn) == "string" and tn ~= "" then
+		v.TemplateName = tn
+	end
+
+	-- Color
+	v.Color = color3ToTable(part.Color)
+
+	-- Material + variant (variant may error on some parts/engine versions; keep safe)
+	v.Material = part.Material.Name
+	local ok, mv = pcall(function() return part.MaterialVariant end)
+	if ok and mv and mv ~= "" then
+		v.MaterialVariant = mv
+	end
+
+	v.Transparency = part.Transparency
+	v.Reflectance = part.Reflectance
+
+	-- Texture (if you use per-face Texture instances)
+	local anyTx = part:FindFirstChildWhichIsA("Texture")
+	if anyTx and anyTx.Texture and anyTx.Texture ~= "" then
+		v.TextureId = anyTx.Texture
+		v.StudsPerTileU = anyTx.StudsPerTileU
+		v.StudsPerTileV = anyTx.StudsPerTileV
+	end
+
+	return v
+end
+
+local function applyVisualSpecToPart(part: BasePart, v)
+	if not v then return end
+	if v.Color then
+		part.Color = tableToColor3(v.Color)
+	end
+	if v.Material then
+		local mat = Enum.Material[v.Material]
+		if mat then part.Material = mat end
+	end
+	if v.MaterialVariant and type(v.MaterialVariant) == "string" then
+		pcall(function()
+			part.MaterialVariant = v.MaterialVariant
+		end)
+	end
+	if typeof(v.Transparency) == "number" then
+		part.Transparency = v.Transparency
+	end
+	if typeof(v.Reflectance) == "number" then
+		part.Reflectance = v.Reflectance
+	end
+
+	-- textures: wipe then recreate (matches your PlacementService style)
+	for _, child in ipairs(part:GetChildren()) do
+		if child:IsA("Texture") or child:IsA("Decal") then
+			child:Destroy()
+		end
+	end
+
+	if v.TextureId and v.TextureId ~= "" then
+		local u = v.StudsPerTileU or 4
+		local w = v.StudsPerTileV or 4
+		for _, face in ipairs(Enum.NormalId:GetEnumItems()) do
+			local tx = Instance.new("Texture")
+			tx.Texture = v.TextureId
+			tx.Face = face
+			tx.StudsPerTileU = u
+			tx.StudsPerTileV = w
+			tx.Parent = part
+		end
+	end
+end
+
+-- Public API
+
+function BuildStateService:BindPlot(player: Player, plotModel: Model)
+	local origin = plotModel:FindFirstChild("Origin")
+	if not (origin and origin:IsA("BasePart")) then
+		warn("[BuildStateService] Plot missing Origin part:", plotModel:GetFullName())
+		return
+	end
+
+	SESSION[player] = SESSION[player] or { blocks = {}, cellIndex = {} }
+	SESSION[player].plotModel = plotModel
+	SESSION[player].origin = origin
+end
+
+function BuildStateService:UnbindPlot(player: Player)
+	SESSION[player] = nil
+end
+
+function BuildStateService:GetSession(player: Player)
+	return SESSION[player]
+end
+
+function BuildStateService:WorldToCell(player: Player, worldPos: Vector3, blockSize: number)
+	local s = SESSION[player]
+	assert(s and s.origin, "BuildStateService: player has no bound plot/origin")
+
+	local localPos = worldPos - s.origin.Position
+	-- Floor division (works for negatives too)
+	local cx = math.floor(localPos.X / blockSize)
+	local cy = math.floor(localPos.Y / blockSize)
+	local cz = math.floor(localPos.Z / blockSize)
+	return { cx, cy, cz }
+end
+
+function BuildStateService:CreateRecord(player: Player, blockId, placedWorldCf: CFrame, cell, part: BasePart?)
+	local s = SESSION[player]
+	assert(s and s.origin, "BuildStateService: player has no bound plot/origin")
+
+	local rel = s.origin.CFrame:ToObjectSpace(placedWorldCf)
+
+	local record = {
+		uid = HttpService:GenerateGUID(false),
+		id = blockId,
+		c = cell,
+		cf = cfToTable(rel),
+		v = part and getVisualSpecFromPart(part) or nil,
+	}
+
+	return record
+end
+
+function BuildStateService:AddPlacedPart(player: Player, record, part: BasePart)
+	local s = SESSION[player]
+	assert(s and s.origin, "BuildStateService: player has no bound plot/origin")
+
+	s.blocks[record.uid] = record
+
+	local key = cellKeyFromCell(record.c)
+	s.cellIndex[key] = s.cellIndex[key] or {}
+	table.insert(s.cellIndex[key], record.uid)
+
+	-- stamp attributes for robust removal / debugging
+	part:SetAttribute("BuildUID", record.uid)
+	part:SetAttribute("CellKey", key)
+	part:SetAttribute("BlockId", record.id)
+
+	return record.uid
+end
+
+function BuildStateService:RemoveByPart(player: Player, part: BasePart, blockSize: number)
+	local s = SESSION[player]
+	if not (s and s.origin) then return end
+
+	local uid = part:GetAttribute("BuildUID")
+	if type(uid) == "string" and s.blocks[uid] then
+		local rec = s.blocks[uid]
+		s.blocks[uid] = nil
+
+		local key = cellKeyFromCell(rec.c)
+		local list = s.cellIndex[key]
+		if list then
+			for i = #list, 1, -1 do
+				if list[i] == uid then
+					table.remove(list, i)
+					break
+				end
+			end
+			if #list == 0 then
+				s.cellIndex[key] = nil
+			end
+		end
+		return true
+	end
+
+	-- fallback: compute cell from position if no uid
+	local cell = self:WorldToCell(player, part.Position, blockSize)
+	local key = cellKeyFromCell(cell)
+	local list = s.cellIndex[key]
+	if not list then return false end
+
+	-- If multiple blocks in cell, we still need a way to choose which.
+	-- Best-effort: remove the closest one by comparing stored rel position.
+	local bestUid, bestDist = nil, math.huge
+	for _, candUid in ipairs(list) do
+		local rec = s.blocks[candUid]
+		if rec then
+			local relCf = tableToCf(rec.cf)
+			local worldCf = s.origin.CFrame:ToWorldSpace(relCf)
+			local d = (worldCf.Position - part.Position).Magnitude
+			if d < bestDist then
+				bestDist, bestUid = d, candUid
+			end
+		end
+	end
+	if bestUid then
+		s.blocks[bestUid] = nil
+		for i = #list, 1, -1 do
+			if list[i] == bestUid then
+				table.remove(list, i)
+				break
+			end
+		end
+		if #list == 0 then
+			s.cellIndex[key] = nil
+		end
+		return true
+	end
+
+	return false
+end
+
+function BuildStateService:Snapshot(player: Player)
+	local s = SESSION[player]
+	if not s then return nil end
+
+	local out = {}
+	for uid, rec in pairs(s.blocks) do
+		table.insert(out, rec)
+	end
+
+	return out
+end
+
+-- Spawn helper (you’ll call this when loading)
+function BuildStateService:SpawnRecords(player: Player, records: {any}, blocksFolder: Instance, resolveTemplateFn)
+	local s = SESSION[player]
+	assert(s and s.origin, "BuildStateService: player has no bound plot/origin")
+
+	local function cellCenterWorld(c)
+		local bs = 4
+		-- Prefer block size from caller if they stored it on session (optional)
+		if s.blockSize and typeof(s.blockSize) == "number" then
+			bs = s.blockSize
+		end
+		local op = s.origin.Position
+		return Vector3.new(
+			op.X + (c[1] + 0.5) * bs,
+			op.Y + (c[2] + 0.5) * bs,
+			op.Z + (c[3] + 0.5) * bs
+		)
+	end
+
+	for _, rec in ipairs(records) do
+		local templateName = (rec.v and rec.v.TemplateName) or nil
+		local template = templateName and resolveTemplateFn(templateName) or nil
+		if not template then
+			-- Fallback to default shape; DO NOT use rec.id (that is your palette BlockId)
+			template = resolveTemplateFn("Block_4x4x4")
+		end
+
+		if template then
+			local part: BasePart? = nil
+			if template:IsA("BasePart") then
+				part = template:Clone()
+			elseif template:IsA("Model") and template.PrimaryPart then
+				part = template.PrimaryPart:Clone()
+			end
+
+			if part then
+				part.Anchored = true
+				part.CanCollide = true
+				part.Name = "Block"
+
+				local relCf = tableToCf(rec.cf)
+				local worldCf = s.origin.CFrame:ToWorldSpace(relCf)
+				local snappedPos = rec.c and cellCenterWorld(rec.c) or worldCf.Position
+				part.CFrame = CFrame.new(snappedPos) * (worldCf - worldCf.Position)
+
+				-- Ensure TemplateName is present going forward
+				if templateName then
+					part:SetAttribute("TemplateName", templateName)
+				end
+
+				applyVisualSpecToPart(part, rec.v)
+				CollectionService:AddTag(part, "PlacedBlock")
+				part.Parent = blocksFolder
+
+				-- register back into session (keep original uid)
+				s.blocks[rec.uid] = rec
+				local key = cellKeyFromCell(rec.c)
+				s.cellIndex[key] = s.cellIndex[key] or {}
+				table.insert(s.cellIndex[key], rec.uid)
+
+				part:SetAttribute("BuildUID", rec.uid)
+				part:SetAttribute("CellKey", key)
+				part:SetAttribute("BlockId", rec.id)
+			end
+		end
+	end
+end
+
+Players.PlayerRemoving:Connect(function(plr)
+	SESSION[plr] = nil
+end)
+
+return BuildStateService
